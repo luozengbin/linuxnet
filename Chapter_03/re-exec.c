@@ -1,3 +1,5 @@
+/* SIGHUPハンドラによる再起動できるサーバ側サンプル */
+
 #include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -15,6 +17,97 @@
 #include <string.h>
 #include <sysexits.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <syslog.h>
+
+/* クローズする最大ディスクリプタ値 */
+#define MAXFD   64
+
+/* コマンドライン引数、環境変数のアドレス保持用 */
+int *argc_;
+char ***argv_;
+char ***envp_;
+
+/* デーモン化 */
+int
+daemonize(int nochdir, int noclose)
+{
+    (void) fprintf(stderr, "parent process id (%d)\n", getpid());
+    int i, fd;
+    pid_t pid;
+    if ((pid = fork()) == -1) {
+        return (-1);
+    } else if (pid != 0) {
+        /* 親プロセスの終了 */
+        _exit(0);
+    }
+    (void) fprintf(stderr, "child fork 1 process id (%d)\n", getpid());
+
+    /* 最初の子プロセスにてsetsidで
+       端末セッション(tty)からの切り離すために、セッションリーダーにする */
+    (void) setsid();
+
+    /* HUPシグナルを無視するように:
+       環境によってはセッションリーダーが終了時に子プロセスに対してSIGHUPシグナルを送り、
+       それによって子プロセスが終了してしまう可能性があるため、SIGHUPシグナルを無視する。
+    */
+    (void) signal(SIGHUP, SIG_IGN);
+
+    /** 端末セッションの再取得防止するため２度目fork
+        端末関連付けはセッションリーダのみ行える */
+    if ((pid = fork()) != 0) {
+        /* 最初の子プロセスの終了 */
+        _exit(0);
+    }
+    (void) fprintf(stderr, "child fork 2process id (%d)\n", getpid());
+    syslog(LOG_USER|LOG_NOTICE, "start process(%d) as daemon!!!\n", getpid());
+    /* デーモンプロセス */
+    if (nochdir == 0) {
+        /* ルートディレクトリに移動 */
+        (void) chdir("/");
+    }
+    if (noclose == 0) {
+        /* すべてのファイルディスクリプタのクローズ */
+        for (i = 0; i < MAXFD; i++) {
+            (void) close(i);
+        }
+        /* stdin,stdout,stderrを/dev/nullでオープン */
+        if ((fd = open("/dev/null", O_RDWR, 0)) != -1) {
+            (void) dup2(fd, 0);
+            (void) dup2(fd, 1);
+            (void) dup2(fd, 2);
+            if (fd > 2) {
+                (void) close(fd);
+            }
+        }
+    }
+    return (0);
+}
+
+/* SIGHUPハンドラ */
+void
+sig_hangup_handler(int sig)
+{
+    int i;
+    syslog(LOG_USER|LOG_NOTICE, "sig_hangup_handler(%d --> %d)!!!\n", getpid(), sig);
+    (void) fprintf(stderr, "sig_hangup_handler(%d)\n", sig);
+    /* stdin,stdout,stderr以外をクローズ */
+    for (i = 3; i < MAXFD; i++) {
+        (void) close(i);
+    }
+
+    char *args[3];
+    args[0]="./re-exec";
+	args[1]="8888";
+	args[2]="1";
+    args[3]=NULL;
+
+    /* 自プロセスの上書き再実行 */
+    if (execve((*argv_)[0], args /* (*argv_) */,(*envp_)) == -1) {
+        perror("execve");
+    }
+}
 /* サーバソケットの準備 */
 int
 server_socket(const char *portnm)
@@ -34,7 +127,6 @@ server_socket(const char *portnm)
         (void) fprintf(stderr, "getaddrinfo():%s\n", gai_strerror(errcode));
         return (-1);
     }
-
     if ((errcode = getnameinfo(res0->ai_addr, res0->ai_addrlen,
                                nbuf, sizeof(nbuf),
                                sbuf, sizeof(sbuf),
@@ -43,8 +135,7 @@ server_socket(const char *portnm)
         freeaddrinfo(res0);
         return (-1);
     }
-    /* バンドする対象アドレスが指定されないため、host=0.0.0.0, port=xxxで出力される */
-    (void) fprintf(stdout, "host=%s, port=%s\n", nbuf, sbuf);
+    (void) fprintf(stderr, "port=%s\n", sbuf);
     /* ソケットの生成 */
     if ((soc = socket(res0->ai_family, res0->ai_socktype, res0->ai_protocol))
         == -1) {
@@ -52,9 +143,6 @@ server_socket(const char *portnm)
         freeaddrinfo(res0);
         return (-1);
     }
-
-    (void) fprintf(stdout, "create socket --> socket descriptor %d\n", soc);
-
     /* ソケットオプション（再利用フラグ）設定 */
     opt = 1;
     opt_len = sizeof(opt);
@@ -71,9 +159,6 @@ server_socket(const char *portnm)
         freeaddrinfo(res0);
         return (-1);
     }
-
-    (void) fprintf(stdout, "bind socket %d on %s:%s\n", soc, nbuf, sbuf);
-
     /* アクセスバックログの指定 */
     if (listen(soc, SOMAXCONN) == -1) {
         perror("listen");
@@ -81,9 +166,6 @@ server_socket(const char *portnm)
         freeaddrinfo(res0);
         return (-1);
     }
-
-    (void) fprintf(stdout, "listen on socket %d \n", soc);
-
     freeaddrinfo(res0);
     return (soc);
 }
@@ -97,8 +179,6 @@ accept_loop(int soc)
     socklen_t len;
     for (;;) {
         len = (socklen_t) sizeof(from);
-
-        (void) fprintf(stdout, "accept on soc %d \n", soc);
         /* 接続受付 */
         if ((acc = accept(soc, (struct sockaddr *) &from, &len)) == -1) {
             if (errno != EINTR) {
@@ -109,11 +189,11 @@ accept_loop(int soc)
                                hbuf, sizeof(hbuf),
                                sbuf, sizeof(sbuf),
                                NI_NUMERICHOST | NI_NUMERICSERV);
-            (void) fprintf(stdout, "accept:%s:%s on new socket %d\n", hbuf, sbuf, acc);
+            (void) fprintf(stderr, "accept:%s:%s\n", hbuf, sbuf);
             /* 送受信ループ */
             send_recv_loop(acc);
             /* アクセプトソケットクローズ */
-            (void) close(acc);
+            close(acc);
             acc = 0;
         }
     }
@@ -125,7 +205,6 @@ mystrlcat(char *dst, const char *src, size_t size)
     const char *ps;
     char *pd, *pde;
     size_t dlen, lest;
-
     for (pd = dst, lest = size; *pd != '\0' && lest !=0; pd++, lest--);
     dlen = pd - dst;
     if (size - dlen == 0) {
@@ -146,7 +225,6 @@ mystrlcat(char *dst, const char *src, size_t size)
 void
 send_recv_loop(int acc)
 {
-    (void) fprintf(stderr, "send_recv_loop on socket %d\n", acc);
     char buf[512], *ptr;
     ssize_t len;
     for (;;) {
@@ -179,28 +257,42 @@ send_recv_loop(int acc)
     }
 }
 int
-main(int argc, char *argv[])
+main(int argc, char *argv[], char *envp[])
 {
+
+    struct sigaction sa;
     int soc;
     /* 引数にポート番号が指定されているか？ */
     if (argc <= 1) {
-        (void) fprintf(stderr,"server port\n");
+        (void) fprintf(stderr,"re-exec port\n");
         return (EX_USAGE);
     }
+
+    if (argc == 3) {
+        (void) fprintf(stderr,"skip daemonize\n");
+    } else {
+        /* デーモン化 */
+        (void) daemonize(0, 0);
+    }
+
+    /* コマンドライン引数、環境変数のアドレスをグローバルに保持 */
+    argc_ = &argc;
+    argv_ = &argv;
+    envp_ = &envp;
+    /* SIGHUPのシグナルハンドラを指定 */
+    (void) sigaction(SIGHUP, (struct sigaction *) NULL, &sa);
+    sa.sa_handler = sig_hangup_handler;
+    sa.sa_flags = SA_NODEFER;
+    (void) sigaction(SIGHUP, &sa, (struct sigaction *) NULL);
+    (void) fprintf(stderr, "sigaction():end\n");
     /* サーバソケットの準備 */
     if ((soc = server_socket(argv[1])) == -1) {
         (void) fprintf(stderr,"server_socket(%s):error\n", argv[1]);
         return (EX_UNAVAILABLE);
     }
-    (void) fprintf(stdout, "ready for accept\n");
+    (void) fprintf(stderr, "ready for accept\n");
     /* アクセプトループ */
     accept_loop(soc);
-
-    /* for (;;) { */
-    /*     (void) fprintf(stdout, "just sleep\n"); */
-    /*     sleep(5); */
-    /* } */
-
     /* ソケットクローズ */
     (void) close(soc);
     return (EX_OK);

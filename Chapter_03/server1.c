@@ -1,3 +1,5 @@
+/* 特定のアドレスをバンドするサンプルコード */
+
 #include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -17,7 +19,7 @@
 #include <unistd.h>
 /* サーバソケットの準備 */
 int
-server_socket(const char *portnm)
+server_socket_by_hostname(const char *hostnm, const char *portnm)
 {
     char nbuf[NI_MAXHOST], sbuf[NI_MAXSERV];
     struct addrinfo hints, *res0;
@@ -30,11 +32,10 @@ server_socket(const char *portnm)
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
     /* アドレス情報の決定 */
-    if ((errcode = getaddrinfo(NULL, portnm, &hints, &res0)) != 0) {
+    if ((errcode = getaddrinfo(hostnm, portnm, &hints, &res0)) != 0) {
         (void) fprintf(stderr, "getaddrinfo():%s\n", gai_strerror(errcode));
         return (-1);
     }
-
     if ((errcode = getnameinfo(res0->ai_addr, res0->ai_addrlen,
                                nbuf, sizeof(nbuf),
                                sbuf, sizeof(sbuf),
@@ -43,8 +44,7 @@ server_socket(const char *portnm)
         freeaddrinfo(res0);
         return (-1);
     }
-    /* バンドする対象アドレスが指定されないため、host=0.0.0.0, port=xxxで出力される */
-    (void) fprintf(stdout, "host=%s, port=%s\n", nbuf, sbuf);
+    (void) fprintf(stderr, "addr=%s\nport=%s\n", nbuf, sbuf);
     /* ソケットの生成 */
     if ((soc = socket(res0->ai_family, res0->ai_socktype, res0->ai_protocol))
         == -1) {
@@ -52,9 +52,6 @@ server_socket(const char *portnm)
         freeaddrinfo(res0);
         return (-1);
     }
-
-    (void) fprintf(stdout, "create socket --> socket descriptor %d\n", soc);
-
     /* ソケットオプション（再利用フラグ）設定 */
     opt = 1;
     opt_len = sizeof(opt);
@@ -71,9 +68,6 @@ server_socket(const char *portnm)
         freeaddrinfo(res0);
         return (-1);
     }
-
-    (void) fprintf(stdout, "bind socket %d on %s:%s\n", soc, nbuf, sbuf);
-
     /* アクセスバックログの指定 */
     if (listen(soc, SOMAXCONN) == -1) {
         perror("listen");
@@ -81,9 +75,6 @@ server_socket(const char *portnm)
         freeaddrinfo(res0);
         return (-1);
     }
-
-    (void) fprintf(stdout, "listen on socket %d \n", soc);
-
     freeaddrinfo(res0);
     return (soc);
 }
@@ -97,8 +88,6 @@ accept_loop(int soc)
     socklen_t len;
     for (;;) {
         len = (socklen_t) sizeof(from);
-
-        (void) fprintf(stdout, "accept on soc %d \n", soc);
         /* 接続受付 */
         if ((acc = accept(soc, (struct sockaddr *) &from, &len)) == -1) {
             if (errno != EINTR) {
@@ -109,7 +98,7 @@ accept_loop(int soc)
                                hbuf, sizeof(hbuf),
                                sbuf, sizeof(sbuf),
                                NI_NUMERICHOST | NI_NUMERICSERV);
-            (void) fprintf(stdout, "accept:%s:%s on new socket %d\n", hbuf, sbuf, acc);
+            (void) fprintf(stderr, "accept:%s:%s\n", hbuf, sbuf);
             /* 送受信ループ */
             send_recv_loop(acc);
             /* アクセプトソケットクローズ */
@@ -125,7 +114,7 @@ mystrlcat(char *dst, const char *src, size_t size)
     const char *ps;
     char *pd, *pde;
     size_t dlen, lest;
-
+    
     for (pd = dst, lest = size; *pd != '\0' && lest !=0; pd++, lest--);
     dlen = pd - dst;
     if (size - dlen == 0) {
@@ -146,7 +135,6 @@ mystrlcat(char *dst, const char *src, size_t size)
 void
 send_recv_loop(int acc)
 {
-    (void) fprintf(stderr, "send_recv_loop on socket %d\n", acc);
     char buf[512], *ptr;
     ssize_t len;
     for (;;) {
@@ -182,25 +170,21 @@ int
 main(int argc, char *argv[])
 {
     int soc;
-    /* 引数にポート番号が指定されているか？ */
-    if (argc <= 1) {
-        (void) fprintf(stderr,"server port\n");
+    /* 引数にIPアドレス・ポート番号が指定されているか？ */
+    if (argc <= 2) {
+        (void) fprintf(stderr,"server1 address port\n");
         return (EX_USAGE);
     }
+
     /* サーバソケットの準備 */
-    if ((soc = server_socket(argv[1])) == -1) {
-        (void) fprintf(stderr,"server_socket(%s):error\n", argv[1]);
+    if ((soc = server_socket_by_hostname(argv[1], argv[2])) == -1) {
+        (void) fprintf(stderr,"server_socket_by_hostname(%s,%s):error\n",
+		       argv[1], argv[2]);
         return (EX_UNAVAILABLE);
     }
-    (void) fprintf(stdout, "ready for accept\n");
+    (void) fprintf(stderr, "ready for accept\n");
     /* アクセプトループ */
     accept_loop(soc);
-
-    /* for (;;) { */
-    /*     (void) fprintf(stdout, "just sleep\n"); */
-    /*     sleep(5); */
-    /* } */
-
     /* ソケットクローズ */
     (void) close(soc);
     return (EX_OK);
